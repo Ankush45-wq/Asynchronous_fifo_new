@@ -1,0 +1,229 @@
+//===================  Asynchronous FIFO   ===============================
+//===================== memory============================================
+module fifo_mem #(parameter W = 8,
+                  parameter D = 8,
+                  parameter PTR_SIZE = 3)
+                  (input w_clk,r_clk,
+                  input w_en,r_en,
+                   input [PTR_SIZE-1:0]w_addr,
+                   input [W-1:0]data_in,
+                   input [PTR_SIZE-1:0] r_addr,
+                   output reg [W-1:0]data_out
+                 );
+  //memory
+  reg[W-1:0]mem[D-1:0];
+  //write logic
+  always@(posedge w_clk)
+    begin
+      if(w_en)
+        begin
+          mem[w_addr] <= data_in;
+        end
+    end
+  //read logic
+  always@(posedge r_clk)
+    begin
+      if(r_en)
+        begin
+          data_out <= mem[r_addr];
+        end
+    end
+  //assign data_out = mem[r_addr];
+endmodule  
+//======================== write pointer handler=============================
+module wr_ptr_handler#(parameter W = 3)(
+  input wr_clk,wr_en,wr_rst,
+  input  [W:0]g_rd_ptr_sync,
+  output reg [W:0]b_wr_ptr,g_wr_ptr,
+  output reg full
+);
+  wire wr_full;
+  wire [W:0]b_wr_ptr_next,g_wr_ptr_next;
+  //next logic
+  assign b_wr_ptr_next = b_wr_ptr + (wr_en && !full); 
+  always@(posedge wr_clk)
+    begin 
+      if(wr_rst)
+        begin
+          b_wr_ptr <= 0;
+          g_wr_ptr <= 0; 
+        end
+      else
+        begin
+          b_wr_ptr <= b_wr_ptr_next;
+          g_wr_ptr <= g_wr_ptr_next;
+        end
+    end
+  //binary to gray
+ assign g_wr_ptr_next = b_wr_ptr_next^ (b_wr_ptr_next>>1);
+  //full logic
+  assign wr_full = (g_wr_ptr_next =={~g_rd_ptr_sync[W:W-1],g_rd_ptr_sync[W-2:0]});
+    always@(posedge wr_clk)
+      begin
+        if(wr_rst)
+          begin
+            full <= 0;  
+          end
+        else
+          begin
+            full  <= wr_full;
+          end
+      end
+endmodule
+  // =========================read pointer handler===========================
+module rd_ptr_handler#(parameter W = 3)(
+  input rd_clk,rd_en,rd_rst,
+  input [W:0]g_wr_ptr_sync,
+  output reg [W:0]b_rd_ptr,g_rd_ptr,
+  output reg empty
+);
+  wire rd_empty;
+  wire [W:0]b_rd_ptr_next,g_rd_ptr_next;
+  //next logic
+  assign b_rd_ptr_next = b_rd_ptr + (rd_en && !empty); 
+  always@(posedge rd_clk)
+    begin 
+      if(rd_rst)
+        begin
+          b_rd_ptr <= 0;
+          g_rd_ptr <= 0; 
+        end
+      else
+        begin
+          b_rd_ptr <= b_rd_ptr_next;
+          g_rd_ptr <= g_rd_ptr_next;
+        end
+    end
+  //binary to gray
+  assign g_rd_ptr_next = b_rd_ptr_next^ (b_rd_ptr_next>>1);
+  //empty logic
+  assign rd_empty = (g_rd_ptr_next == g_wr_ptr_sync);
+  always@(posedge rd_clk)
+      begin
+        if(rd_rst)
+          begin
+            empty <= 1;  
+          end
+        else
+          begin
+            empty  <= rd_empty;
+          end
+      end
+endmodule
+  
+  //================================Synchronizer===========================
+  module synchronizer #(parameter W = 4)(
+    input clk,rst,
+    input [W-1:0]data_in,
+    output reg [W-1:0]data_out
+  );
+    reg [W-1:0]q1;
+    
+    always@(posedge clk)
+      begin
+        if(rst)
+          begin
+            q1 <= 0;
+            data_out <= 0;
+          end
+        else
+          begin
+            q1 <= data_in;
+            data_out <= q1;
+          end
+      end
+ endmodule
+//===================================top module=============================
+ module top_fifo#(
+  				  parameter W = 8,
+                  parameter D = 8,
+                  parameter PTR_SIZE = 3
+
+                )(//write interface
+                  input wr_clk,
+                  input wr_en,
+                  input wr_rst,
+                  input [W-1:0]data_in,
+
+                  //read interface
+                  input rd_clk,
+                  input rd_en,
+                  input rd_rst,
+                  output [W-1:0]data_out,
+                  
+                  //status
+                  output full,
+                  output empty
+ );
+  
+  //binary read && write ptr
+  wire[PTR_SIZE:0] b_rd_ptr,b_wr_ptr;
+  wire[PTR_SIZE:0] g_rd_ptr,g_wr_ptr;
+  wire[PTR_SIZE:0] g_rd_ptr_sync,g_wr_ptr_sync;
+   wire write_allow;
+   wire read_allow;
+
+assign write_allow = wr_en && !full;
+assign read_allow  = rd_en && !empty;
+  
+  // memory
+  fifo_mem #( .W(W),
+          .D(D),
+         .PTR_SIZE(PTR_SIZE))
+        mem(.w_clk(wr_clk),
+            .r_clk(rd_clk),
+            .w_en(write_allow),
+            .r_en(read_allow),
+             .w_addr(b_wr_ptr[PTR_SIZE-1:0]),
+             .data_in(data_in),
+             .r_addr(b_rd_ptr[PTR_SIZE-1:0]),
+             .data_out(data_out));
+  
+//write point handler
+  wr_ptr_handler#(.W(PTR_SIZE))
+  wr_ptr(
+    .wr_clk(wr_clk),
+    .wr_en(write_allow),
+    .wr_rst(wr_rst),
+    .g_rd_ptr_sync(g_rd_ptr_sync),
+    .b_wr_ptr(b_wr_ptr),
+    .g_wr_ptr(g_wr_ptr),
+    .full(full)
+);
+  // read point handler
+  
+  rd_ptr_handler#(.W(PTR_SIZE))
+  rd_ptr(
+    .rd_clk(rd_clk),
+    .rd_en(read_allow),
+    .rd_rst(rd_rst),
+    .g_wr_ptr_sync(g_wr_ptr_sync),
+    .b_rd_ptr(b_rd_ptr),
+    .g_rd_ptr(g_rd_ptr),
+    .empty(empty)
+);
+  
+  // synchronizer write2read 
+  synchronizer #( .W(PTR_SIZE+1))
+  sync_wr2rd(
+    .clk(rd_clk),
+    .rst(rd_rst),
+    .data_in(g_wr_ptr),
+    .data_out(g_wr_ptr_sync)
+  );
+  // synchronizer read2write
+  synchronizer #( .W(PTR_SIZE+1))
+  sync_rd2wr(
+    .clk(wr_clk),
+    .rst(wr_rst),
+    .data_in(g_rd_ptr),
+    .data_out(g_rd_ptr_sync)
+  );
+ endmodule
+  
+  
+  
+  
+  
+  
+  
